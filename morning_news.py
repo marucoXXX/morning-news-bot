@@ -31,7 +31,7 @@ from openai import OpenAI
 # ============================================================
 # 設定
 # ============================================================
-NEWS_MODEL = "claude-opus-4-7"          # 朝刊生成
+NEWS_MODEL = "claude-sonnet-4-6"        # 朝刊生成（コスト重視で4/29にOPUSからSONNETへ変更）
 SCRIPT_MODEL = "claude-sonnet-4-6"      # 台本変換（軽量モデルで十分）
 TTS_MODEL = "tts-1-hd"                  # OpenAI TTS（品質重視）
 TTS_VOICE = "shimmer"                   # 落ち着いた女性ボイス（他: alloy, echo, fable, onyx, nova）
