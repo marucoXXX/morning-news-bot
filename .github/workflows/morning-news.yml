@@ -3,10 +3,7 @@ name: Morning News Briefing
 on:
   schedule:
     # JST 7:00 = UTC 22:00（前日）
-    # cron is in UTC. "0 22 * * *" = 毎日UTC 22:00 = JST 7:00
     - cron: "0 22 * * *"
-
-  # 手動実行用（GitHubの "Run workflow" ボタン）
   workflow_dispatch:
 
 jobs:
@@ -32,6 +29,7 @@ jobs:
       - name: Generate and send morning news
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
