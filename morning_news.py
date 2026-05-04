@@ -1,17 +1,17 @@
 """
-Morning News Bot (Phase 1: Audio Attachment)
-=============================================
-毎朝、海外の主要紙から「朝刊」を生成してGmail配信する。
-さらに、朝刊をラジオ番組風の台本に変換してOpenAI TTSで音声化し、
-MP3としてメールに添付する。
+Morning News Bot v3 (Gemini for News Generation)
+=================================================
+v2 からの変更点：
+- 朝刊本体（Step 1）を Anthropic Claude Opus 4.7 → Google Gemini 2.5 Pro に変更
+  - コスト: 約 $0.50/回 → 約 $0.10/回（約1/5）
+  - Web検索: Gemini の Google Search Grounding を使用
+- ラジオ台本生成（Step 2）と TTS（Step 3）はそのまま
 
 処理の流れ：
-1. Claude API（claude-opus-4-7）で朝刊Markdown生成（web_search使用）
-2. Claude API（claude-sonnet-4-6）でラジオ台本生成（音声向けに口語調・3-5分）
-3. OpenAI TTS でMP3生成
-4. Gmail SMTP でHTMLメール + MP3添付で送信
-
-実行はGitHub Actionsから（毎日JST 7:00）。
+1. Gemini 2.5 Pro + Google Search Grounding: 朝刊Markdown生成
+2. Anthropic Claude Sonnet 4.6: ラジオ台本生成（軽量タスク）
+3. OpenAI TTS: MP3生成
+4. Gmail SMTP: HTMLメール + MP3添付で送信
 """
 
 import os
@@ -25,17 +25,25 @@ from email.mime.text import MIMEText
 
 import anthropic
 import markdown
+from google import genai
+from google.genai import types
 from openai import OpenAI
 
 
 # ============================================================
 # 設定
 # ============================================================
-NEWS_MODEL = "claude-sonnet-4-6"        # 朝刊生成（コスト重視で4/29にOPUSからSONNETへ変更）
-SCRIPT_MODEL = "claude-sonnet-4-6"      # 台本変換（軽量モデルで十分）
-TTS_MODEL = "tts-1-hd"                  # OpenAI TTS（品質重視）
-TTS_VOICE = "shimmer"                   # 落ち着いた女性ボイス（他: alloy, echo, fable, onyx, nova）
-TTS_SPEED = 1.0                         # 0.25〜4.0、1.0が標準
+# 朝刊生成: Gemini 2.5 Pro（バランス）
+# コストをさらに下げたい場合は "gemini-2.5-flash" に変更（コスト約1/5、品質はやや低下）
+NEWS_MODEL = "gemini-2.5-pro"
+
+# ラジオ台本生成: Anthropic Sonnet 4.6（軽量タスクなのでこれで十分）
+SCRIPT_MODEL = "claude-sonnet-4-6"
+
+# 音声生成: OpenAI TTS
+TTS_MODEL = "tts-1-hd"
+TTS_VOICE = "shimmer"
+TTS_SPEED = 1.0
 
 MAX_TOKENS_NEWS = 16000
 MAX_TOKENS_SCRIPT = 8000
@@ -43,7 +51,7 @@ JST = timezone(timedelta(hours=9))
 
 
 # ============================================================
-# プロンプト1: 朝刊生成（Phase 1から流用）
+# プロンプト1: 朝刊生成（Gemini向けに少し調整）
 # ============================================================
 NEWS_SYSTEM_PROMPT = """あなたは「Global News Sharer（朝刊モード）」スキルを実行する戦略コンサルタントです。
 海外の主要紙・メディアから今日の朝刊を組み立てる役割を持ちます。
@@ -152,13 +160,15 @@ US: NYT / WSJ / Bloomberg / Reuters / AP / Axios / TechCrunch / The Information 
 
 # 重要な制約
 
-- 必ず web_search ツールを使って最新情報を取得すること
-- 1記事あたり 2〜3 回の web_search で十分。合計で 12〜18 回程度を目安に
+- Google Searchを積極的に使って最新情報を取得すること（推測で書かない）
+- 検索結果のファクトに基づいて書く。創作・誇張禁止
+- スポットの未報道判定は必ず日本語サイト指定検索を実行
+- 出力は完全な Markdown 形式で、上記構造を厳密に守る
 - 確認・前置きなしに、いきなり朝刊本体を出力する"""
 
 
 # ============================================================
-# プロンプト2: ラジオ台本生成（NEW）
+# プロンプト2: ラジオ台本生成（v2と同じ）
 # ============================================================
 SCRIPT_SYSTEM_PROMPT = """あなたは経済・テック専門のラジオパーソナリティです。
 朝の通勤・ランニング中の聞き手に向けて、海外ニュース朝刊を「3〜5分のラジオ番組台本」に変換します。
@@ -177,7 +187,7 @@ SCRIPT_SYSTEM_PROMPT = """あなたは経済・テック専門のラジオパー
    - 全6本の見出しは紹介しない（聞き手が混乱する）。代わりに「3つの大きな話題」のように要約
 
 2. **メイン記事の紹介（各記事30〜45秒）**
-   - 朝刊の5本＋スポット1本のうち、**最も重要な3〜4本のみ取り上げる**（全6本入れると長すぎる）
+   - 朝刊の5本＋スポット1本のうち、**最も重要な3〜4本のみ取り上げる**
    - 選定基準：日本のビジネスパーソンへの示唆が大きい順
    - 各記事の構成：
      a. 背景の一言サマリー（1文）
@@ -192,23 +202,20 @@ SCRIPT_SYSTEM_PROMPT = """あなたは経済・テック専門のラジオパー
 
 絶対に守ってください：
 
-- **絵文字・記号・URLは一切含めない**（読み上げで「マルイチ」「ハートマーク」と読まれる）
+- **絵文字・記号・URLは一切含めない**
 - **箇条書き・見出し記号も使わない**（プレーンな段落だけ）
 - **数字は適切に変換**：
   - `$33B` → 「330億ドル、日本円で約5兆円」
   - `+582%` → 「プラス582パーセント」
-  - `2026年4月` → 「ニーゼロニーロク年4月」ではなく「2026年4月」のまま
 - **英語の固有名詞**は読みやすく：
   - `OpenAI` → 「オープン・エーアイ」
   - `Anthropic` → 「アンソロピック」
-  - `DeepSeek` → 「ディープシーク」
   - `Tim Cook` → 「ティム・クック」
 - **専門用語は解説を一言加える**：
   - 「LLM、つまり大規模言語モデル」
-  - 「DCF、つまり割引キャッシュフロー法」
-- **長い文を避ける**：1文あたり40〜60字程度を目安に
-- **段落の間は必ず1行空ける**（音声合成エンジンが間を取りやすい）
-- **「、」「。」を意識的に多用**（自然な間が生まれる）
+- **長い文を避ける**：1文あたり40〜60字程度
+- **段落の間は必ず1行空ける**
+- **「、」「。」を意識的に多用**
 
 # 出力形式
 
@@ -237,59 +244,66 @@ SCRIPT_SYSTEM_PROMPT = """あなたは経済・テック専門のラジオパー
 
 
 # ============================================================
-# Step 1: 朝刊Markdown生成
+# Step 1: 朝刊Markdown生成（Gemini 2.5 Pro + Google Search）
 # ============================================================
 def generate_morning_news(api_key: str) -> str:
-    """Claude APIで朝刊Markdownを生成する。"""
-    client = anthropic.Anthropic(api_key=api_key)
+    """Gemini 2.5 Pro + Google Search Grounding で朝刊Markdownを生成する。"""
     today = datetime.now(JST)
     date_label = today.strftime("%Y-%m-%d %a")
 
     print(f"[INFO] [Step 1/3] Generating morning news for {date_label}...", file=sys.stderr)
-    print(f"[INFO] Model: {NEWS_MODEL}", file=sys.stderr)
+    print(f"[INFO] Model: {NEWS_MODEL} (Gemini)", file=sys.stderr)
 
-    response = client.messages.create(
-        model=NEWS_MODEL,
-        max_tokens=MAX_TOKENS_NEWS,
-        system=NEWS_SYSTEM_PROMPT,
-        tools=[
-            {
-                "type": "web_search_20250305",
-                "name": "web_search",
-                "max_uses": 25,
-            }
-        ],
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"今日（{date_label}）の朝刊を生成してください。\n\n"
-                    "過去24〜72時間の海外主要紙ヘッドラインから、"
-                    "メイン5本＋国内未報道スポット1本を選定し、"
-                    "SKILL指示に従って完全な朝刊Markdownを出力してください。"
-                ),
-            }
-        ],
+    client = genai.Client(api_key=api_key)
+
+    user_prompt = (
+        f"今日（{date_label}）の朝刊を生成してください。\n\n"
+        "過去24〜72時間の海外主要紙ヘッドラインから、"
+        "メイン5本＋国内未報道スポット1本を選定し、"
+        "SKILL指示に従って完全な朝刊Markdownを出力してください。\n\n"
+        "Google Searchを使って最新情報を取得しながら進めてください。"
     )
 
-    text_parts = [b.text for b in response.content if b.type == "text"]
-    markdown_body = "\n".join(text_parts)
+    # Google Search Grounding を有効化
+    google_search_tool = types.Tool(google_search=types.GoogleSearch())
+
+    response = client.models.generate_content(
+        model=NEWS_MODEL,
+        contents=user_prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=NEWS_SYSTEM_PROMPT,
+            tools=[google_search_tool],
+            max_output_tokens=MAX_TOKENS_NEWS,
+            temperature=0.7,
+        ),
+    )
+
+    markdown_body = response.text or ""
     print(f"[INFO] Generated {len(markdown_body)} chars of markdown", file=sys.stderr)
+
+    # Grounding情報があればログに出す（デバッグ用、コストではない）
+    if hasattr(response, "candidates") and response.candidates:
+        candidate = response.candidates[0]
+        if hasattr(candidate, "grounding_metadata") and candidate.grounding_metadata:
+            chunks = getattr(candidate.grounding_metadata, "grounding_chunks", None)
+            if chunks:
+                print(f"[INFO] Grounding sources: {len(chunks)} pages referenced", file=sys.stderr)
+
     return markdown_body
 
 
 # ============================================================
-# Step 2: ラジオ台本に変換（NEW）
+# Step 2: ラジオ台本に変換（Anthropic Claude Sonnet 4.6）
 # ============================================================
 def generate_radio_script(api_key: str, news_markdown: str) -> str:
-    """朝刊Markdownをラジオ番組風の台本に変換する。"""
-    client = anthropic.Anthropic(api_key=api_key)
+    """朝刊Markdownをラジオ番組風の台本に変換する（Anthropic Claude）。"""
     today = datetime.now(JST)
     date_label = today.strftime("%Y年%m月%d日 %a曜日")
 
     print(f"[INFO] [Step 2/3] Generating radio script...", file=sys.stderr)
-    print(f"[INFO] Model: {SCRIPT_MODEL}", file=sys.stderr)
+    print(f"[INFO] Model: {SCRIPT_MODEL} (Anthropic)", file=sys.stderr)
 
+    client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(
         model=SCRIPT_MODEL,
         max_tokens=MAX_TOKENS_SCRIPT,
@@ -314,23 +328,14 @@ def generate_radio_script(api_key: str, news_markdown: str) -> str:
 
 
 # ============================================================
-# Step 3: OpenAI TTS で音声生成（NEW）
+# Step 3: OpenAI TTS で音声生成（v2と同じ）
 # ============================================================
 def generate_audio_with_openai(api_key: str, script: str, output_path: str) -> str:
-    """OpenAI TTS APIで台本をMP3に変換する。
-
-    OpenAI TTSは1リクエストあたり最大4096文字まで。
-    台本が長い場合は分割して生成し、後で結合する。
-
-    Returns:
-        生成されたMP3ファイルのパス
-    """
+    """OpenAI TTS APIで台本をMP3に変換する。"""
     print(f"[INFO] [Step 3/3] Generating audio with OpenAI TTS...", file=sys.stderr)
     print(f"[INFO] TTS model: {TTS_MODEL}, voice: {TTS_VOICE}", file=sys.stderr)
 
     client = OpenAI(api_key=api_key)
-
-    # 4000字を超える場合は段落単位で分割
     chunks = _split_text_for_tts(script, max_chars=4000)
     print(f"[INFO] Script split into {len(chunks)} chunk(s)", file=sys.stderr)
 
@@ -355,7 +360,6 @@ def generate_audio_with_openai(api_key: str, script: str, output_path: str) -> s
 
 
 def _split_text_for_tts(text: str, max_chars: int = 4000) -> list[str]:
-    """TTS用にテキストを分割する。段落（空行）境界で分割し、自然な間を保つ。"""
     if len(text) <= max_chars:
         return [text]
 
@@ -363,7 +367,6 @@ def _split_text_for_tts(text: str, max_chars: int = 4000) -> list[str]:
     chunks = []
     current = ""
     for para in paragraphs:
-        # 現在のチャンクに追加してもmax_charsを超えないなら追加
         if len(current) + len(para) + 2 <= max_chars:
             current = (current + "\n\n" + para) if current else para
         else:
@@ -376,10 +379,9 @@ def _split_text_for_tts(text: str, max_chars: int = 4000) -> list[str]:
 
 
 # ============================================================
-# Markdown → HTML 変換（メール用）
+# Markdown → HTML 変換
 # ============================================================
 def markdown_to_email_html(md_text: str, date_label: str, has_audio: bool) -> str:
-    """朝刊MarkdownをメールHTMLに変換する。"""
     html_body = markdown.markdown(
         md_text,
         extensions=["extra", "sane_lists", "nl2br"],
@@ -408,7 +410,7 @@ def markdown_to_email_html(md_text: str, date_label: str, has_audio: bool) -> st
       {_inject_inline_styles(html_body)}
     </div>
     <div style="margin-top:40px;padding-top:16px;border-top:1px solid #ddd;font-size:12px;color:#888;text-align:center;">
-      Generated by Claude (Anthropic API) + OpenAI TTS · GitHub Actions による自動配信
+      Generated by Gemini 2.5 Pro + OpenAI TTS · GitHub Actions
     </div>
   </div>
 </body>
@@ -417,7 +419,6 @@ def markdown_to_email_html(md_text: str, date_label: str, has_audio: bool) -> st
 
 
 def _inject_inline_styles(html: str) -> str:
-    """生成HTMLにインラインスタイルを注入。"""
     replacements = [
         ("<h1>", '<h1 style="font-size:20px;margin:32px 0 16px 0;padding-bottom:8px;border-bottom:2px solid #1a1a1a;">'),
         ("<h2>", '<h2 style="font-size:18px;margin:28px 0 12px 0;padding:8px 12px;background:#f0f0f0;border-left:4px solid #1a1a1a;">'),
@@ -438,7 +439,7 @@ def _inject_inline_styles(html: str) -> str:
 
 
 # ============================================================
-# Gmail SMTP送信（音声添付対応）
+# Gmail SMTP送信（v2と同じ）
 # ============================================================
 def send_email_with_audio(
     sender: str,
@@ -449,8 +450,6 @@ def send_email_with_audio(
     plain_body: str,
     audio_path: str | None = None,
 ) -> None:
-    """Gmail SMTPでHTMLメール（+ MP3添付オプション）を送信。"""
-    # 添付ありの場合は mixed、なしの場合は alternative
     if audio_path:
         msg = MIMEMultipart("mixed")
         body_container = MIMEMultipart("alternative")
@@ -478,7 +477,6 @@ def send_email_with_audio(
         print(f"[INFO] Attached audio: {filename} ({size_mb:.2f} MB)", file=sys.stderr)
 
     print(f"[INFO] Connecting to smtp.gmail.com:587...", file=sys.stderr)
-    # アプリパスワードに混入する可能性のある空白類を全除去
     cleaned_password = re.sub(r"\s+", "", app_password)
     with smtplib.SMTP("smtp.gmail.com", 587) as server:
         server.starttls()
@@ -491,14 +489,15 @@ def send_email_with_audio(
 # メインエントリポイント
 # ============================================================
 def main() -> int:
+    gemini_key = os.environ.get("GEMINI_API_KEY")
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
     gmail_address = os.environ.get("GMAIL_ADDRESS")
     gmail_app_password = os.environ.get("GMAIL_APP_PASSWORD")
     recipient_email = os.environ.get("RECIPIENT_EMAIL")
 
-    # 必須変数チェック
     required = {
+        "GEMINI_API_KEY": gemini_key,
         "ANTHROPIC_API_KEY": anthropic_key,
         "GMAIL_ADDRESS": gmail_address,
         "GMAIL_APP_PASSWORD": gmail_app_password,
@@ -509,7 +508,6 @@ def main() -> int:
         print(f"[ERROR] Missing env vars: {', '.join(missing)}", file=sys.stderr)
         return 1
 
-    # OPENAI_API_KEY は無い場合「音声なしで送信」モードで継続
     audio_enabled = bool(openai_key)
     if not audio_enabled:
         print("[WARN] OPENAI_API_KEY not set. Sending without audio attachment.", file=sys.stderr)
@@ -517,20 +515,17 @@ def main() -> int:
     today = datetime.now(JST)
     date_label = today.strftime("%Y-%m-%d %a")
 
-    # ----------------------------------------------------------------
-    # Step 1: 朝刊Markdown生成
-    # ----------------------------------------------------------------
+    # Step 1: 朝刊生成（Gemini）
     try:
-        markdown_body = generate_morning_news(anthropic_key)
+        markdown_body = generate_morning_news(gemini_key)
+        if not markdown_body.strip():
+            raise RuntimeError("Empty response from Gemini")
     except Exception as e:
         print(f"[ERROR] Failed to generate news: {e}", file=sys.stderr)
         markdown_body = f"# 朝刊生成エラー\n\n本日の朝刊生成に失敗しました。\n\nエラー: `{e}`\n\nGitHub Actions のログを確認してください。"
-        # 朝刊生成失敗時は音声もスキップ
         audio_enabled = False
 
-    # ----------------------------------------------------------------
-    # Step 2 & 3: 台本生成 + 音声生成（オプション）
-    # ----------------------------------------------------------------
+    # Step 2 & 3: 台本 + 音声
     audio_path = None
     if audio_enabled:
         try:
@@ -542,9 +537,7 @@ def main() -> int:
             print("[WARN] Falling back to email-only delivery.", file=sys.stderr)
             audio_path = None
 
-    # ----------------------------------------------------------------
     # Step 4: メール送信
-    # ----------------------------------------------------------------
     has_audio = audio_path is not None
     html = markdown_to_email_html(markdown_body, date_label, has_audio=has_audio)
     audio_emoji = "🎧" if has_audio else "📰"
