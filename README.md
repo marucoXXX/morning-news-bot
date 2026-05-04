@@ -1,181 +1,174 @@
-# Morning News Bot
+# Morning News Bot v3（Gemini版）
 
-毎朝7時（JST）に、海外の主要紙から「朝刊」を自動生成して Gmail で配信するボット。
+毎朝7時（JST）に、海外の主要紙から「朝刊」を自動生成して **HTMLメール + MP3音声** を Gmail で配信するボット。
 
-GitHub Actions で動作するため、自分のPCを開いておく必要はありません。
-
----
-
-## 構成
-
-- **言語**: Python 3.11
-- **AI**: Anthropic Claude API（claude-opus-4-7、web_search ツール付き）
-- **配信**: Gmail SMTP（HTMLメール）
-- **実行基盤**: GitHub Actions（無料枠で十分）
+**v3 では朝刊生成を Gemini 2.5 Pro に変更し、コストを大幅削減**。
 
 ---
 
-## 朝刊の中身
+## v2 から v3 への変更点
 
-- 海外メイン5本（US 2-3本、欧州 1本、中国/アジア 1本）
-- 国内未報道スポット 1本（日本のメディアでほぼ報道されていない海外ニュース）
-
-各記事は「背景／ポイント／日本への示唆／批判的コメント」の4セクション。
+| 機能 | v2 | v3 |
+|---|---|---|
+| 朝刊本体生成 | Anthropic Claude Opus 4.7 | **Google Gemini 2.5 Pro** ← 変更 |
+| 朝刊本体の検索 | Anthropic web_search（Bing系） | **Google Search Grounding** ← 変更 |
+| ラジオ台本生成 | Anthropic Claude Sonnet 4.6 | Anthropic Claude Sonnet 4.6（変更なし） |
+| MP3生成 | OpenAI TTS | OpenAI TTS（変更なし） |
+| Gmail配信 | Gmail SMTP | Gmail SMTP（変更なし） |
 
 ---
 
-## セットアップ手順
+## コスト削減効果
 
-### 1. このリポジトリを GitHub にアップロード
+| 項目 | v2 月コスト | v3 月コスト |
+|---|---|---|
+| 朝刊本体（Anthropic Opus 4.7 → Gemini 2.5 Pro） | $15〜$25 | **$1.5〜$4.5** |
+| ラジオ台本（Anthropic Sonnet 4.6） | $0.5〜$1.5 | $0.5〜$1.5 |
+| 音声生成（OpenAI TTS） | $1〜$2 | $1〜$2 |
+| **合計** | **$17〜$28（約2,500〜4,000円）** | **$3〜$8（約450〜1,200円）** |
 
-1. GitHub で新規リポジトリを作成（プライベート推奨）
-2. このZIPの中身をすべてリポジトリにアップロード（または `git push`）
+**約75%のコストカット**。
 
-ファイル構成：
+---
 
-```
-morning-news-bot/
-├── morning_news.py
-├── requirements.txt
-├── README.md
-└── .github/
-    └── workflows/
-        └── morning-news.yml
-```
+## アップグレード手順（v2 から移行する場合）
 
-### 2. 4つのシークレットを登録
+### 1. Google AI Studio で Gemini API キーを取得
 
-GitHub のリポジトリ画面で：
+1. https://aistudio.google.com にアクセス（Googleアカウントでログイン）
+2. 左メニュー **「Get API key」** をクリック
+3. **Create API key** → プロジェクト選択 → 作成
+4. 表示される `AIzaSy...` 形式のキーを **コピーして保管**
+5. **無料枠あり**（1日のリクエスト数制限内）。朝刊1回/日なら無料枠で収まる可能性が高い
+6. 課金を有効化したい場合は Google Cloud Console で billing 設定
 
-**Settings → Secrets and variables → Actions → New repository secret**
+⚠️ Anthropic / OpenAI と異なり、**Gemini API は最初は無料枠のみで動作する**。クレジットカード登録は不要で始められる。
 
-以下4つを順番に登録します：
+### 2. GitHub Secrets に `GEMINI_API_KEY` を追加
+
+リポジトリ → **Settings → Secrets and variables → Actions → New repository secret**
 
 | Name | Value |
 |---|---|
-| `ANTHROPIC_API_KEY` | `sk-ant-api03-...`（Anthropic Console で発行したAPIキー） |
-| `GMAIL_ADDRESS` | 送信元のGmailアドレス（例：`yourname@gmail.com`） |
-| `GMAIL_APP_PASSWORD` | Gmail のアプリパスワード16桁（スペース込みでも可） |
-| `RECIPIENT_EMAIL` | 受信先のメールアドレス（送信元と同じでも可） |
+| `GEMINI_API_KEY` | `AIzaSy...`（Step 1で取得したキー） |
 
-#### Anthropic API キーの取得
+既存のSecretは変更不要：
+- `ANTHROPIC_API_KEY`（Step 2のラジオ台本生成で引き続き必要）
+- `OPENAI_API_KEY`
+- `GMAIL_ADDRESS`
+- `GMAIL_APP_PASSWORD`
+- `RECIPIENT_EMAIL`
 
-1. https://console.anthropic.com にサインアップ
-2. API Keys → Create Key
-3. 表示される `sk-ant-api03-...` をコピー（**一度しか表示されない**ので注意）
-4. 初回 $5 無料クレジット付き。なくなったら課金設定（Settings → Billing）
+### 3. リポジトリのファイル3つを置き換え
 
-#### Gmail アプリパスワードの取得
+このZIPの中身で、既存リポジトリの以下3ファイルを **完全置換**：
 
-1. https://myaccount.google.com → セキュリティ
-2. **2段階認証プロセス** を有効化（既に有効ならスキップ）
-3. 検索で「アプリ パスワード」 → 開く
-4. アプリ名: `Morning News Bot` → 作成
-5. 表示される 16桁のパスワードをコピー
+- `morning_news.py`
+- `requirements.txt`
+- `.github/workflows/morning-news.yml`
 
-⚠️ 通常のGoogleパスワードではなく、必ずアプリパスワード（16桁専用）を使ってください。
+GitHubのWeb UIで個別に編集する場合：
 
-### 3. 動作確認（手動実行）
+1. 各ファイルをリポジトリで開く
+2. 鉛筆アイコン（Edit）をクリック
+3. エディタ内を **全選択（Cmd+A / Ctrl+A）** → **削除**
+4. 新しい内容を貼り付け
+5. **Commit changes**
 
-スケジュール実行を待たずに、まず手動で動かして確認します：
+### 4. 動作確認
 
-1. GitHub のリポジトリ画面 → **Actions** タブ
-2. 左サイドバーで **Morning News Briefing** を選択
-3. 右上の **Run workflow** ボタン → **Run workflow**
-4. 数分待つ（だいたい3〜5分）
-5. 緑のチェックマークが付けば成功 → メールBOXを確認
+1. **Actions** タブ → **Morning News Briefing** → **Run workflow**
+2. 数分待つ
+3. ログを確認：
+   ```
+   env:
+     GEMINI_API_KEY: ***       ← この行が出ていればYAML置換成功
+     ANTHROPIC_API_KEY: ***
+     OPENAI_API_KEY: ***
+     ...
 
-メールが届いていれば動作OKです。届かない場合は、Actions のログを開いてエラーを確認してください。
-
-### 4. 毎朝7時の自動配信
-
-シークレット4つが登録済みなら、何もしなくても毎日 JST 7:00 に自動配信されます。
-
-GitHub Actionsの cron は UTC で動くため、`.github/workflows/morning-news.yml` の中で `cron: "0 22 * * *"`（UTC 22:00 = JST 7:00）と指定しています。
-
-#### 配信時刻を変更する場合
-
-`.github/workflows/morning-news.yml` の `cron` 行を編集：
-
-| JST 配信時刻 | UTC 表記 | cron 文字列 |
-|---|---|---|
-| 6:00 | 21:00（前日） | `"0 21 * * *"` |
-| 7:00 | 22:00（前日） | `"0 22 * * *"` |
-| 8:00 | 23:00（前日） | `"0 23 * * *"` |
-| 17:00（夕刊） | 8:00 | `"0 8 * * *"` |
-
-※ GitHub Actions の cron は数分〜十数分の遅延があります（無料枠の都合）。
+   [INFO] [Step 1/3] Generating morning news...
+   [INFO] Model: gemini-2.5-pro (Gemini)        ← Gemini使用が確認できる
+   [INFO] Generated XXXX chars of markdown
+   [INFO] Grounding sources: XX pages referenced ← Google Search使用の証拠
+   [INFO] [Step 2/3] Generating radio script...
+   ...
+   ```
+4. メールが届くか確認
 
 ---
 
-## コスト見積もり
+## さらにコストを下げたい場合
 
-| 項目 | 月額目安 |
+`morning_news.py` 上部の `NEWS_MODEL` を変更：
+
+```python
+NEWS_MODEL = "gemini-2.5-flash"   # Pro → Flash でさらに約1/5のコスト
+```
+
+**月コストの目安**：
+
+| 設定 | 月コスト |
 |---|---|
-| GitHub Actions | **無料**（無料枠 2,000分/月、朝刊1回あたり3〜5分使用） |
-| Gmail SMTP | **無料** |
-| Anthropic Claude API | **約 $5〜$15 / 月**（毎日朝刊1回、web_search 25回程度） |
+| `gemini-2.5-pro`（v3デフォルト） | $3〜$8 |
+| `gemini-2.5-flash` | **$1〜$3（約150〜450円）** |
 
-合計：**月数百円〜2,000円程度**。
-
-API使用量は Anthropic Console の Usage ページで監視できます。
-コストが想定より高い場合は、`morning_news.py` の `max_uses` を `25 → 15` に下げると web_search 回数が抑えられます。
+朝刊用途では Flash でも品質は十分です。Pro で数日試して、特に不満がなければ Flash に下げるのがおすすめ。
 
 ---
 
 ## トラブルシューティング
 
-### ❌ メールが届かない
+### ❌ `google.api_core.exceptions.PermissionDenied: 403`
 
-1. GitHub の Actions タブでワークフローのログを確認
-2. ログに `[INFO] Email sent to ...` が出ていれば送信は成功 → Gmail の迷惑メールフォルダを確認
-3. `Authentication failed` エラー → アプリパスワードを再発行して `GMAIL_APP_PASSWORD` を更新
-4. `2-Step Verification not enabled` エラー → Google アカウントで2段階認証を有効化
+Gemini APIキーが無効、またはGoogle AI Studioでキーが正しく発行されていない。
 
-### ❌ Claude API でエラー
+対処：
+1. https://aistudio.google.com → Get API key で **新しいキーを作り直す**
+2. GitHub Secrets で `GEMINI_API_KEY` を更新
 
-1. `401 authentication_error` → `ANTHROPIC_API_KEY` の値を再確認
-2. `400 invalid_request_error: model not found` → `morning_news.py` の `MODEL` を調整（例：`claude-sonnet-4-6` にすればコストも下がる）
-3. `529 overloaded` → APIサーバーが一時的に混雑。翌朝以降は自動回復
+### ❌ `ResourceExhausted: 429 Quota exceeded`
 
-### ⚠️ メール本文の見た目が崩れる
+無料枠の1日のリクエスト上限に達した。
 
-Gmail Web版とスマホ版で多少差があります。スマホ版で読むのが前提ならスマホで動作確認を。
+対処：
+- 翌日まで待つ（無料枠リセット）
+- Google Cloud Console で billing を有効化（有料化）し、上限を引き上げる
 
-### 📅 朝刊が一部の日に空になる
+### ❌ メールは届くが、朝刊の品質が落ちた
 
-土日・祝日・市場休場日はニュースが少ないため、5本に満たない場合があります。SKILLの設計上、無理に埋めずに3〜4本で配信されます。
+Gemini 2.5 Pro は Claude Opus 4.7 より分析の深さがやや劣る場合がある。
 
----
+対処：
+1. `morning_news.py` の `NEWS_MODEL` を一時的に `gemini-2.5-pro` のままにし、`SCRIPT_MODEL` のレビューと比較
+2. それでも不満なら、朝刊生成だけ Anthropic に戻す（`generate_morning_news` 関数を v2 のものに差し替え）
 
-## カスタマイズ
+### ❌ Web検索ソースが少ない / 古い
 
-### ニュース選定の方針を変えたい
+Gemini の Google Search Grounding は Anthropic の web_search よりも、検索回数の制御が緩やか。
 
-`morning_news.py` の `SYSTEM_PROMPT` を編集してください。
-例えば：
-
-- AI/LLM に特化したい → 「メイン5本のうち4本以上はAI/LLM関連」を追加
-- 中国比率を上げたい → 「中国 2本、US 2本、欧州 1本」に変更
-- スポットを2本にしたい → スポット選定ルールの本数を変更
-
-### モデルを変えたい
-
-`MODEL = "claude-opus-4-7"` を `claude-sonnet-4-6` 等に変更するとコストが下がります（品質はわずかに低下）。
-
-### 配信先を増やしたい
-
-`RECIPIENT_EMAIL` をカンマ区切りにし、`morning_news.py` の `recipient` 変数で `split(",")` してリスト化、`recipient_emails` を `msg["To"]` にカンマ連結で渡すよう改修すれば対応可能です。
+対処：
+- ログの `Grounding sources: XX pages referenced` で参照件数を確認
+- 少ない場合は `morning_news.py` の `temperature` を上げる（0.7 → 0.9）と多様な検索をするようになる
 
 ---
 
-## ライセンス
+## なぜ Gemini が安いのか
 
-個人利用・組織内利用は自由です。
+- Gemini 2.5 Pro: Input $1.25/1M tokens, Output $5/1M tokens
+- Claude Opus 4.7: Input $15/1M tokens, Output $75/1M tokens
+
+**Inputで12倍、Outputで15倍** の差があります。朝刊1回でだいたい15K入力 + 8K出力なので、累積するとかなり大きな差に。
 
 ---
 
-## 関連
+## 現状のアーキテクチャ
 
-このボットは Claude のスキル「global-news-sharer」（SKILL.md）の設計をベースにしています。
-スキルの全仕様は `SKILL.md` を参照してください。
+```
+朝刊生成（情報収集と要約）       → Gemini 2.5 Pro（コスト効率）
+ラジオ台本生成（軽量変換タスク）  → Claude Sonnet 4.6（日本語の自然さ）
+音声生成（TTS）                 → OpenAI tts-1-hd（日本語TTS品質トップ）
+```
+
+各ステップで「最適なモデル」を使い分ける構成。
+コストを最大限に削るなら、Step 2もGemini Flashに置き換え可能（さらに月$0.5ほど節約）。
