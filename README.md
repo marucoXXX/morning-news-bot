@@ -1,174 +1,149 @@
-# Morning News Bot v3（Gemini版）
+# Morning News Bot v3.2
 
-毎朝7時（JST）に、海外の主要紙から「朝刊」を自動生成して **HTMLメール + MP3音声** を Gmail で配信するボット。
-
-**v3 では朝刊生成を Gemini 2.5 Pro に変更し、コストを大幅削減**。
+毎朝7時（JST）に、**海外6本＋国内7本＝13本のニュース**を Gmail で配信するボット。
+朝刊本体は読み物として、添付MP3（7〜10分）は通勤・ランニング中の聴取用。
 
 ---
 
-## v2 から v3 への変更点
+## v3 から v3.2 への変更点
 
-| 機能 | v2 | v3 |
+| 機能 | v3 | v3.2 |
 |---|---|---|
-| 朝刊本体生成 | Anthropic Claude Opus 4.7 | **Google Gemini 2.5 Pro** ← 変更 |
-| 朝刊本体の検索 | Anthropic web_search（Bing系） | **Google Search Grounding** ← 変更 |
-| ラジオ台本生成 | Anthropic Claude Sonnet 4.6 | Anthropic Claude Sonnet 4.6（変更なし） |
-| MP3生成 | OpenAI TTS | OpenAI TTS（変更なし） |
-| Gmail配信 | Gmail SMTP | Gmail SMTP（変更なし） |
+| 海外ニュース朝刊 | 6本（メイン5本＋スポット1本） | 6本（変更なし） |
+| **国内ニュース朝刊** | ❌ なし | **7本（深掘り3本＋見出し4本）** ← NEW |
+| **重複排除ロジック** | ❌ なし | **海外で扱った話題を国内から除外** ← NEW |
+| ラジオ台本 | 海外3〜4本のみ、3〜5分 | **海外6本＋国内深掘り3本=9本、7〜10分** ← 拡張 |
+| HTML メール | 海外朝刊1セクション | **2セクション統合（SECTION 1: 海外 / SECTION 2: 国内）** ← NEW |
 
 ---
 
-## コスト削減効果
+## コスト見積もり
 
-| 項目 | v2 月コスト | v3 月コスト |
+| 項目 | v3 月コスト | v3.2 月コスト |
 |---|---|---|
-| 朝刊本体（Anthropic Opus 4.7 → Gemini 2.5 Pro） | $15〜$25 | **$1.5〜$4.5** |
-| ラジオ台本（Anthropic Sonnet 4.6） | $0.5〜$1.5 | $0.5〜$1.5 |
-| 音声生成（OpenAI TTS） | $1〜$2 | $1〜$2 |
-| **合計** | **$17〜$28（約2,500〜4,000円）** | **$3〜$8（約450〜1,200円）** |
+| 朝刊本体（Gemini 2.5 Pro × 2回／日） | $1.5〜$4.5 | **$3〜$9** |
+| ラジオ台本（Claude Sonnet 4.6） | $0.5〜$1.5 | **$1〜$3** |
+| 音声生成（OpenAI TTS） | $1〜$2 | **$2〜$4** |
+| **合計** | **$3〜$8** | **$6〜$16（約900〜2,400円/月）** |
 
-**約75%のコストカット**。
+日経電子版（月4,277円）の **約半額〜70%程度** で、海外＋国内合計13本+音声付き。
 
 ---
 
-## アップグレード手順（v2 から移行する場合）
+## Claude Code経由のインストール手順（v3 から v3.2 への移行）
 
-### 1. Google AI Studio で Gemini API キーを取得
+### 1. このZIPをローカルに解凍
 
-1. https://aistudio.google.com にアクセス（Googleアカウントでログイン）
-2. 左メニュー **「Get API key」** をクリック
-3. **Create API key** → プロジェクト選択 → 作成
-4. 表示される `AIzaSy...` 形式のキーを **コピーして保管**
-5. **無料枠あり**（1日のリクエスト数制限内）。朝刊1回/日なら無料枠で収まる可能性が高い
-6. 課金を有効化したい場合は Google Cloud Console で billing 設定
+```bash
+unzip morning-news-bot-v3.2.zip
+```
 
-⚠️ Anthropic / OpenAI と異なり、**Gemini API は最初は無料枠のみで動作する**。クレジットカード登録は不要で始められる。
+### 2. Claude Code でリポジトリのクローンディレクトリに移動
 
-### 2. GitHub Secrets に `GEMINI_API_KEY` を追加
+ローカルにクローン済みのリポジトリディレクトリで Claude Code を起動：
 
-リポジトリ → **Settings → Secrets and variables → Actions → New repository secret**
+```bash
+cd ~/path/to/morning-news-bot
+claude
+```
 
-| Name | Value |
-|---|---|
-| `GEMINI_API_KEY` | `AIzaSy...`（Step 1で取得したキー） |
+### 3. Claude Code に以下を依頼
 
-既存のSecretは変更不要：
-- `ANTHROPIC_API_KEY`（Step 2のラジオ台本生成で引き続き必要）
-- `OPENAI_API_KEY`
-- `GMAIL_ADDRESS`
-- `GMAIL_APP_PASSWORD`
-- `RECIPIENT_EMAIL`
+ZIPの中身を統合してmainにpushしてもらう例：
 
-### 3. リポジトリのファイル3つを置き換え
+```
+~/Downloads/morning-news-bot-v3.2/ にあるv3.2のファイルを、このリポジトリに統合してください。
 
-このZIPの中身で、既存リポジトリの以下3ファイルを **完全置換**：
+具体的には：
+1. morning_news.py を v3.2 の内容で完全置換
+2. requirements.txt を v3.2 の内容で完全置換
+3. .github/workflows/morning-news.yml を v3.2 の内容で完全置換
+4. README.md は更新せず、現状維持（または v3.2 README をコピー）
+5. SKILL.md はそのまま残す
+6. 変更内容を確認して、適切なコミットメッセージで commit してください
+7. main ブランチにpushしてください
 
-- `morning_news.py`
-- `requirements.txt`
-- `.github/workflows/morning-news.yml`
+なお、GEMINI_API_KEY/ANTHROPIC_API_KEY/OPENAI_API_KEY/GMAIL_ADDRESS/GMAIL_APP_PASSWORD/RECIPIENT_EMAIL のSecretsは既に登録済みです。
+```
 
-GitHubのWeb UIで個別に編集する場合：
-
-1. 各ファイルをリポジトリで開く
-2. 鉛筆アイコン（Edit）をクリック
-3. エディタ内を **全選択（Cmd+A / Ctrl+A）** → **削除**
-4. 新しい内容を貼り付け
-5. **Commit changes**
+Claude Codeが差分を表示し、確認してからcommit & push。
 
 ### 4. 動作確認
 
-1. **Actions** タブ → **Morning News Briefing** → **Run workflow**
-2. 数分待つ
-3. ログを確認：
-   ```
-   env:
-     GEMINI_API_KEY: ***       ← この行が出ていればYAML置換成功
-     ANTHROPIC_API_KEY: ***
-     OPENAI_API_KEY: ***
-     ...
+GitHub Actions の **Run workflow** で手動実行 → 数分待つ → メール受信を確認。
 
-   [INFO] [Step 1/3] Generating morning news...
-   [INFO] Model: gemini-2.5-pro (Gemini)        ← Gemini使用が確認できる
-   [INFO] Generated XXXX chars of markdown
-   [INFO] Grounding sources: XX pages referenced ← Google Search使用の証拠
-   [INFO] [Step 2/3] Generating radio script...
-   ...
-   ```
-4. メールが届くか確認
+ログで以下が出ていれば成功：
+```
+[INFO] [Step 1/4] Generating global morning news...
+[INFO] Generated XXXX chars of global news markdown
+[INFO] [Step 2/4] Generating domestic morning news...
+[INFO] Excluding X topics from global edition       ← 重複排除が効いた証拠
+[INFO] Generated XXXX chars of domestic news markdown
+[INFO] [Step 3/4] Generating extended radio script...
+[INFO] Generated XXXX chars of script               ← 3,500〜5,000字程度のはず
+[INFO] [Step 4/4] Generating audio with OpenAI TTS...
+[INFO] Audio saved: morning_news_YYYYMMDD.mp3 (X.XX MB)  ← 6〜10MB
+[INFO] Email sent to ***
+```
 
 ---
 
-## さらにコストを下げたい場合
+## 新しい Secrets は必要？
 
-`morning_news.py` 上部の `NEWS_MODEL` を変更：
-
-```python
-NEWS_MODEL = "gemini-2.5-flash"   # Pro → Flash でさらに約1/5のコスト
-```
-
-**月コストの目安**：
-
-| 設定 | 月コスト |
-|---|---|
-| `gemini-2.5-pro`（v3デフォルト） | $3〜$8 |
-| `gemini-2.5-flash` | **$1〜$3（約150〜450円）** |
-
-朝刊用途では Flash でも品質は十分です。Pro で数日試して、特に不満がなければ Flash に下げるのがおすすめ。
+**いいえ、追加なし**。v3.0 で登録した6つのSecrets（GEMINI、ANTHROPIC、OPENAI、GMAIL_ADDRESS、GMAIL_APP_PASSWORD、RECIPIENT_EMAIL）がそのまま使えます。
 
 ---
 
 ## トラブルシューティング
 
-### ❌ `google.api_core.exceptions.PermissionDenied: 403`
+### ❌ 国内朝刊だけ生成失敗、海外は届く
 
-Gemini APIキーが無効、またはGoogle AI Studioでキーが正しく発行されていない。
+ログで `[ERROR] Failed to generate domestic news:` を確認。
+原因の多くは Gemini API の一時的なエラー。翌日の自動実行で復活します。
+頻発する場合は `morning_news.py` の `temperature` を 0.7 → 0.5 に下げると安定します。
 
-対処：
-1. https://aistudio.google.com → Get API key で **新しいキーを作り直す**
-2. GitHub Secrets で `GEMINI_API_KEY` を更新
+### ❌ 海外と国内で同じ話題が重複している
 
-### ❌ `ResourceExhausted: 429 Quota exceeded`
+`extract_global_headlines` 関数の正規表現が見出しを正しく抽出できていない可能性。
+ログの `[INFO] Excluding X topics from global edition` で X が **0** または **少なすぎる** 場合は、
+海外朝刊のフロントページのフォーマットが想定と違っている。
+Gemini に「フロントページの ① ② ③ 形式を厳密に守る」指示を追加すれば解決。
 
-無料枠の1日のリクエスト上限に達した。
+### ❌ ラジオ台本が長すぎる/短すぎる
 
-対処：
-- 翌日まで待つ（無料枠リセット）
-- Google Cloud Console で billing を有効化（有料化）し、上限を引き上げる
+`SCRIPT_SYSTEM_PROMPT` の「文字数は 3,500〜5,000字程度」を
+具体的な数字に変えてください（例：「4,000〜4,500字程度」）。
 
-### ❌ メールは届くが、朝刊の品質が落ちた
+### ⚠️ メールが20MBを超えてGmail制限に引っかかる
 
-Gemini 2.5 Pro は Claude Opus 4.7 より分析の深さがやや劣る場合がある。
-
-対処：
-1. `morning_news.py` の `NEWS_MODEL` を一時的に `gemini-2.5-pro` のままにし、`SCRIPT_MODEL` のレビューと比較
-2. それでも不満なら、朝刊生成だけ Anthropic に戻す（`generate_morning_news` 関数を v2 のものに差し替え）
-
-### ❌ Web検索ソースが少ない / 古い
-
-Gemini の Google Search Grounding は Anthropic の web_search よりも、検索回数の制御が緩やか。
-
-対処：
-- ログの `Grounding sources: XX pages referenced` で参照件数を確認
-- 少ない場合は `morning_news.py` の `temperature` を上げる（0.7 → 0.9）と多様な検索をするようになる
+7〜10分の音声は通常6〜10MB程度なので問題ないはず。
+万一超える場合は `TTS_MODEL = "tts-1"` に下げると音声容量が約半分に。
 
 ---
 
-## なぜ Gemini が安いのか
+## カスタマイズ余地
 
-- Gemini 2.5 Pro: Input $1.25/1M tokens, Output $5/1M tokens
-- Claude Opus 4.7: Input $15/1M tokens, Output $75/1M tokens
+すべて `morning_news.py` の上部定数または各 SYSTEM_PROMPT で調整可能：
 
-**Inputで12倍、Outputで15倍** の差があります。朝刊1回でだいたい15K入力 + 8K出力なので、累積するとかなり大きな差に。
+| 調整したいこと | 場所 | 対処 |
+|---|---|---|
+| 国内ニュースの本数を変える（例: 9本に） | `DOMESTIC_NEWS_SYSTEM_PROMPT` | 「深掘り3本＋見出し4本」を「深掘り4本＋見出し5本」に |
+| 国内のテーマ範囲を変える | `DOMESTIC_NEWS_SYSTEM_PROMPT` | 「優先度高/中」のリストを編集 |
+| ラジオ台本で取り上げる本数を変える | `SCRIPT_SYSTEM_PROMPT` | 「海外6本」「国内深掘り3本」を変更 |
+| 音声時間を変える | `SCRIPT_SYSTEM_PROMPT` | 「7〜10分」「3,500〜5,000字」を変更 |
+| コスト下げる（さらに） | 上部定数 | `NEWS_MODEL = "gemini-2.5-flash"` |
 
 ---
 
-## 現状のアーキテクチャ
+## ファイル構成
 
 ```
-朝刊生成（情報収集と要約）       → Gemini 2.5 Pro（コスト効率）
-ラジオ台本生成（軽量変換タスク）  → Claude Sonnet 4.6（日本語の自然さ）
-音声生成（TTS）                 → OpenAI tts-1-hd（日本語TTS品質トップ）
+morning-news-bot/
+├── morning_news.py              ← v3.2 で更新
+├── requirements.txt             ← 変更なし（v3と同じ）
+├── README.md                    ← v3.2 README（このファイル）
+├── SKILL.md                     ← 変更なし
+└── .github/
+    └── workflows/
+        └── morning-news.yml     ← timeout を 15分→20分 に拡張
 ```
-
-各ステップで「最適なモデル」を使い分ける構成。
-コストを最大限に削るなら、Step 2もGemini Flashに置き換え可能（さらに月$0.5ほど節約）。

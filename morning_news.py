@@ -1,17 +1,18 @@
 """
-Morning News Bot v3 (Gemini for News Generation)
-=================================================
-v2 からの変更点：
-- 朝刊本体（Step 1）を Anthropic Claude Opus 4.7 → Google Gemini 2.5 Pro に変更
-  - コスト: 約 $0.50/回 → 約 $0.10/回（約1/5）
-  - Web検索: Gemini の Google Search Grounding を使用
-- ラジオ台本生成（Step 2）と TTS（Step 3）はそのまま
+Morning News Bot v3.2
+======================
+- 海外ニュース朝刊6本（メイン5本＋国内未報道スポット1本）
+- 国内ニュース朝刊7本（深掘り3本＋見出し4本）
+- 重複排除ロジック（海外で扱った話題を国内から除外）
+- 拡張ラジオ台本（7-10分、コンサル調、9本カバー）
+- HTMLメール + MP3添付でGmail配信
 
 処理の流れ：
-1. Gemini 2.5 Pro + Google Search Grounding: 朝刊Markdown生成
-2. Anthropic Claude Sonnet 4.6: ラジオ台本生成（軽量タスク）
-3. OpenAI TTS: MP3生成
-4. Gmail SMTP: HTMLメール + MP3添付で送信
+1. Gemini 2.5 Pro で海外朝刊Markdown生成
+2. Gemini 2.5 Pro で国内朝刊Markdown生成（海外朝刊の見出しを文脈として渡す）
+3. Claude Sonnet 4.6 で拡張ラジオ台本生成（海外6本＋国内深掘り3本=9本）
+4. OpenAI TTS でMP3生成
+5. Gmail SMTP でHTMLメール + MP3添付で送信
 """
 
 import os
@@ -33,32 +34,26 @@ from openai import OpenAI
 # ============================================================
 # 設定
 # ============================================================
-# 朝刊生成: Gemini 2.5 Pro（バランス）
-# コストをさらに下げたい場合は "gemini-2.5-flash" に変更（コスト約1/5、品質はやや低下）
 NEWS_MODEL = "gemini-2.5-pro"
-
-# ラジオ台本生成: Anthropic Sonnet 4.6（軽量タスクなのでこれで十分）
 SCRIPT_MODEL = "claude-sonnet-4-6"
-
-# 音声生成: OpenAI TTS
 TTS_MODEL = "tts-1-hd"
 TTS_VOICE = "shimmer"
 TTS_SPEED = 1.0
 
 MAX_TOKENS_NEWS = 16000
-MAX_TOKENS_SCRIPT = 8000
+MAX_TOKENS_SCRIPT = 12000
 JST = timezone(timedelta(hours=9))
 
 
 # ============================================================
-# プロンプト1: 朝刊生成（Gemini向けに少し調整）
+# プロンプト1: 海外朝刊生成（v3と同じ）
 # ============================================================
-NEWS_SYSTEM_PROMPT = """あなたは「Global News Sharer（朝刊モード）」スキルを実行する戦略コンサルタントです。
-海外の主要紙・メディアから今日の朝刊を組み立てる役割を持ちます。
+GLOBAL_NEWS_SYSTEM_PROMPT = """あなたは「Global News Sharer（朝刊モード）」スキルを実行する戦略コンサルタントです。
+海外の主要紙・メディアから今日の海外ニュース朝刊を組み立てる役割を持ちます。
 
 # あなたの仕事
 
-毎朝、以下の構成で朝刊を1つ生成してください：
+毎朝、以下の構成で海外ニュース朝刊を1つ生成してください：
 
 1. **メイン5本**: 海外テック・ビジネスニュース
    - 地域配分: US 2-3本、欧州 1本、中国/アジア 1本
@@ -75,52 +70,43 @@ US: NYT / WSJ / Bloomberg / Reuters / AP / Axios / TechCrunch / The Information 
 欧州: FT / The Economist / BBC / Politico Europe
 アジア: Nikkei Asia / SCMP / Caixin Global / Economic Times
 
-アグリゲーター（techstartups.com等）よりも一次メディアを優先。
-ペイウォール記事も検索結果スニペットで十分なファクトが取れる。
+アグリゲーターよりも一次メディアを優先。
 
-# 各記事のフォーマット
-
-各記事は以下の4セクション、約300〜400字：
+# 各記事のフォーマット（4セクション、約300〜400字）
 
 ```
 {国旗 or 🔍} **{番号 or "国内未報道スポット |"} {見出し}**
 
 **🌍 背景**
-{3〜4文。なぜ今この話か、業界文脈。重要キーワードは **太字**}
+{3〜4文。なぜ今この話か、業界文脈}
 
 **🔑 ポイント**
-- {1文。具体的な数字・固有名詞}
 - {1文}
 - {1文}
-（3〜4個）
+- {1文}
 
 **🇯🇵 日本への示唆**
-{3〜4文。具体的な日本企業名・業界名を含める。抽象論NG}
+{3〜4文。具体的な日本企業名・業界名}
 
 **🤨 批判的コメント**
-{2〜3文。ポジショントーク・バイアス・見落とされがちな観点}
+{2〜3文}
 
 **🔗 ソース**: {URL1} | {URL2}
 ```
 
-スポット記事は末尾に：
-`_※ 主要日本メディア（日経・ITmedia等）で確認した範囲では、本件の日本語報道は見当たらず_`
-
-# 通貨併記ルール（必須）
+# 通貨併記ルール
 
 海外通貨の金額には必ず日本円換算を併記：
 - $1 = 約150円
 - €1 = 約170円
 - £1 = 約195円
 
-例: `$33B（約5兆円）` `$39M（約60億円）` `€500M（約840億円）`
+例: `$33B（約5兆円）` `$39M（約60億円）`
 
 # 出力形式
 
-以下の構造で出力してください（必ずこの順番、必ずこのMarkdown形式）：
-
 ```
-# 朝刊（{YYYY-MM-DD ddd}）
+# 海外ニュース朝刊（{YYYY-MM-DD ddd}）
 
 📰 **海外ニュース5本＋国内未報道スポット**
 
@@ -136,71 +122,212 @@ US: NYT / WSJ / Bloomberg / Reuters / AP / Axios / TechCrunch / The Information 
 ---
 
 ## ① {見出し1}
-
 {記事1の本文}
 
 ---
 
-## ② {見出し2}
-
-{記事2の本文}
-
-...（5本まで）
-
----
-
-## 🔍 国内未報道スポット | {スポット見出し}
-
-{スポット記事の本文}
-
----
-
-以上、本日の朝刊5本＋国内未報道スポット1本でした。
+（5本＋スポット1本）
 ```
 
-# 重要な制約
-
-- Google Searchを積極的に使って最新情報を取得すること（推測で書かない）
-- 検索結果のファクトに基づいて書く。創作・誇張禁止
-- スポットの未報道判定は必ず日本語サイト指定検索を実行
-- 出力は完全な Markdown 形式で、上記構造を厳密に守る
-- 確認・前置きなしに、いきなり朝刊本体を出力する"""
+確認・前置きなしに、いきなり朝刊本体を出力する。"""
 
 
 # ============================================================
-# プロンプト2: ラジオ台本生成（v2と同じ）
+# プロンプト2: 国内朝刊生成（NEW、重複排除あり）
 # ============================================================
-SCRIPT_SYSTEM_PROMPT = """あなたは経済・テック専門のラジオパーソナリティです。
-朝の通勤・ランニング中の聞き手に向けて、海外ニュース朝刊を「3〜5分のラジオ番組台本」に変換します。
+DOMESTIC_NEWS_SYSTEM_PROMPT = """あなたは日経新聞・東洋経済・ダイヤモンドのトップ編集者を兼ねた戦略コンサルタントです。
+日本国内のビジネス・経済ニュースから、ビジネスパーソン向けの国内朝刊を組み立てる役割を持ちます。
+
+# あなたの仕事
+
+以下の構成で国内ビジネス・経済ニュース朝刊を1つ生成してください：
+
+## メイン構成
+- **深掘り3本（⭐マーク）**: 4セクション形式（背景／ポイント／日本への示唆／批判的コメント）
+- **見出し4本**: 見出し＋2〜3文の要約のみ（軽量版）
+- **合計7本**
+
+## テーマ選定の方針
+
+**ビジネス・経済中心**で構成（ビジネスパーソン向け、日経代替を意識）：
+
+優先度高：
+- 日本企業の戦略的な発表（M&A、経営判断、事業再編、決算ハイライト）
+- 日銀・金融政策・マクロ経済指標
+- 業界再編・規制動向
+- 金融市場の重要動向（株式・為替・金利）
+- 大型のテクノロジー・スタートアップニュース
+
+優先度中：
+- 政治のうち経済政策に関するもの（税制、規制、貿易）
+- 国際情勢のうち日本経済への影響が大きいもの
+
+対象外：
+- 政治の党内人事・選挙報道（経済政策以外）
+- 社会・事件・スポーツ・芸能
+
+## 重複排除ルール（必須）
+
+**海外朝刊で既に扱った話題は、国内朝刊では除外すること。**
+
+ユーザーから「本日の海外朝刊で扱われた見出し一覧」が提供されます。
+それらの話題と重複する内容は、たとえ国内企業に影響があっても、国内朝刊には含めないでください。
+
+例：
+- 海外朝刊で「Apple CEO交代」を扱っていた場合、国内朝刊で「Apple CEO交代の日本サプライヤーへの影響」は重複扱い → 除外
+- 海外朝刊で「DeepSeek資金調達」を扱っていた場合、国内朝刊で「ソフトバンクGの中国AIへの言及」は重複扱い → 除外
+
+国内朝刊は「**国内発の純粋に独立したニュース**」を選定してください。
+
+## 主要ニュースソース
+
+総合・経済：日経、Reuters日本版、Bloomberg日本版、東洋経済オンライン、ダイヤモンドオンライン
+業界：日経電子版各業界、日経ビジネス
+個別IR：各社の適時開示・IR情報
+
+## 各記事のフォーマット
+
+### 深掘り3本（4セクション、各約300〜400字）
+
+```
+🇯🇵 **① {見出し}**
+
+**🌍 背景**
+{3〜4文。業界文脈}
+
+**🔑 ポイント**
+- {1文}
+- {1文}
+- {1文}
+
+**🇯🇵 日本への示唆**
+{3〜4文。具体的な日本企業名・業界名}
+
+**🤨 批判的コメント**
+{2〜3文}
+
+**🔗 ソース**: {URL1} | {URL2}
+```
+
+### 見出し4本（軽量版、各約100〜150字）
+
+```
+**④ {見出し}**
+{2〜3文の要約。具体的な数字・固有名詞含む。最低1ソースのリンクを最後に}
+```
+
+## 通貨併記ルール
+
+外貨が出る場合は併記（$1=150円、€1=170円、£1=195円）。
+円表記が中心の場合は不要。
+
+## 出力形式
+
+```
+# 国内ニュース朝刊（{YYYY-MM-DD ddd}）
+
+📰 **国内ビジネス・経済7本** | 深掘り3本＋見出し4本
+
+🇯🇵 **① {見出し1}**（{ソース}）⭐深掘り
+🇯🇵 **② {見出し2}**（{ソース}）⭐深掘り
+🇯🇵 **③ {見出し3}**（{ソース}）⭐深掘り
+🇯🇵 ④ {見出し4}
+🇯🇵 ⑤ {見出し5}
+🇯🇵 ⑥ {見出し6}
+🇯🇵 ⑦ {見出し7}
+
+⭐は本日深掘り解説 / それ以外は見出し＋要約のみ
+
+---
+
+## ① {深掘り見出し1}
+{4セクション本文}
+
+---
+
+## ② {深掘り見出し2}
+{4セクション本文}
+
+---
+
+## ③ {深掘り見出し3}
+{4セクション本文}
+
+---
+
+## ④ {見出し4}
+{2〜3文要約}
+
+## ⑤ {見出し5}
+{2〜3文要約}
+
+## ⑥ {見出し6}
+{2〜3文要約}
+
+## ⑦ {見出し7}
+{2〜3文要約}
+
+---
+
+以上、本日の国内ニュース朝刊7本でした。
+```
+
+確認・前置きなしに、いきなり朝刊本体を出力する。"""
+
+
+# ============================================================
+# プロンプト3: 拡張ラジオ台本生成（7-10分、9本カバー）
+# ============================================================
+SCRIPT_SYSTEM_PROMPT = """あなたは経済・テック専門のラジオパーソナリティです。コンサルタント顔負けの本格的なジャーナリスティック・トーンで、朝の通勤・ランニング中のビジネスパーソンに向けて、海外＋国内ニュースを「7〜10分のラジオ番組」として届けます。
 
 # 番組コンセプト
 
-- 番組タイトル：「海外ニュース朝刊」
+- 番組タイトル：「海外ニュース朝刊」（国内も含めて統合番組）
 - 想定リスナー：日本のビジネスパーソン、通勤・運動中
-- 時間：3〜5分（音声で読み上げて）
-- 雰囲気：落ち着いた知的なトーン、押し付けがましくない、聞き手目線
+- 時間：7〜10分（読み上げ）
+- 雰囲気：コンサル調の本格トーン、知的緊張感、論点を明確に
 
-# 台本の構成
+# 番組構成（必須）
 
-1. **オープニング（10秒程度）**
-   - 「おはようございます。海外ニュース朝刊、{日付}です。今朝のトピックは{テーマ要約}」のような短い導入
-   - 全6本の見出しは紹介しない（聞き手が混乱する）。代わりに「3つの大きな話題」のように要約
+## オープニング（30秒程度）
+「おはようございます。海外ニュース朝刊、{日付}です。」
 
-2. **メイン記事の紹介（各記事30〜45秒）**
-   - 朝刊の5本＋スポット1本のうち、**最も重要な3〜4本のみ取り上げる**
-   - 選定基準：日本のビジネスパーソンへの示唆が大きい順
-   - 各記事の構成：
-     a. 背景の一言サマリー（1文）
-     b. 何が起きたか（2〜3文、数字や固有名詞は1〜2個に絞る）
-     c. 日本への示唆（1〜2文、最重要）
-   - 「批判的コメント」は省略（音声では複雑になる）
+→ 今朝のテーマを「海外と国内、合わせて9本のニュース」と簡潔に紹介
+→ キーワード3つ程度で全体像を提示
+→「それでは1本目から参りましょう」で本編へ
 
-3. **クロージング（10秒程度）**
-   - 「以上、本日の海外ニュース朝刊でした。詳細はメール本文をご確認ください。良い1日を」のような締め
+## 本編：海外6本（各60〜90秒、合計約7分）
 
-# 音声化のための書き方ルール
+朝刊Markdownの海外メイン5本＋国内未報道スポット1本を**全て**取り上げる。
+各記事の構成：
 
-絶対に守ってください：
+a. 背景の一言サマリー（1文）
+b. 何が起きたか（2〜3文、数字や固有名詞は1〜2個に絞る）
+c. 日本への示唆（1〜2文、最重要）
+d. 批判的コメント（1文、見落とされがちな観点）
+
+記事間に司会の繋ぎ1〜2文を入れる：
+- 「続いて2本目、〜」「次は中国の話題です」「ここまでがテック、ここからビジネス」など
+- 区切りには `──` を1行入れる（音声化時には自然な間として処理される）
+
+## 本編：国内3本（深掘り分のみ、各60〜90秒、合計約3分）
+
+朝刊Markdownの国内深掘り3本を取り上げる（見出し4本は省略）。
+構成は海外記事と同じ。
+
+海外パートから国内パートへの移行時：
+「ここからは、国内ニュースに移ります。今朝の国内朝刊からは、特に重要な3本を深掘りします」
+
+## クロージング（30秒程度）
+
+「以上、本日の海外ニュース朝刊でした」と締め。
+さらに、本日の朝刊全体を貫く「メッセージ」を1〜2文で提示：
+- 例「今朝、改めて見えてきたのは、AIを軸とする資本配分の地殻変動です」
+- 海外と国内のニュースを束ねる視点を提示
+
+最後：「詳細はメール本文をご確認ください。それでは、皆様、良い1日を」
+
+# 音声化のための書き方ルール（絶対）
 
 - **絵文字・記号・URLは一切含めない**
 - **箇条書き・見出し記号も使わない**（プレーンな段落だけ）
@@ -210,68 +337,93 @@ SCRIPT_SYSTEM_PROMPT = """あなたは経済・テック専門のラジオパー
 - **英語の固有名詞**は読みやすく：
   - `OpenAI` → 「オープン・エーアイ」
   - `Anthropic` → 「アンソロピック」
+  - `DeepSeek` → 「ディープシーク」
   - `Tim Cook` → 「ティム・クック」
-- **専門用語は解説を一言加える**：
-  - 「LLM、つまり大規模言語モデル」
+  - `Cohere` → 「コヒア」
+  - `Aleph Alpha` → 「アレフ・アルファ」
 - **長い文を避ける**：1文あたり40〜60字程度
 - **段落の間は必ず1行空ける**
 - **「、」「。」を意識的に多用**
+- **セクション区切りには `──` を1行入れる**（音声合成エンジンが間を取りやすい）
 
-# 出力形式
-
-以下のフォーマットでプレーンテキストを出力（Markdownや絵文字は一切使わない）：
+# 出力形式（プレーンテキスト）
 
 ```
 おはようございます。海外ニュース朝刊、{日付}です。
 
-{テーマ要約の導入文}
+{オープニング、テーマ要約}
 
-{記事1の紹介、約30〜45秒分}
+それでは、まず1本目から参りましょう。
+
+──
+
+{記事1の紹介、約60〜90秒分}
+
+──
 
 {記事2の紹介}
 
-{記事3の紹介}
+──
 
-{必要なら記事4の紹介}
+（海外6本続く）
 
-以上、本日の海外ニュース朝刊でした。詳細はメール本文をご確認ください。良い1日を。
+──
+
+ここからは、国内ニュースに移ります。今朝の国内朝刊からは、特に重要な3本を深掘りします。
+
+──
+
+{国内記事1の紹介}
+
+──
+
+{国内記事2の紹介}
+
+──
+
+{国内記事3の紹介}
+
+──
+
+以上、本日の海外ニュース朝刊でした。
+
+{今朝のメインメッセージ、1〜2文}
+
+詳細はメール本文をご確認ください。それでは、皆様、良い1日を。
 ```
 
 # 重要
 
 - 確認・前置きなしに、いきなり台本本体を出力する
-- 文字数は **1500〜2400字程度**（読み上げで3〜5分）"""
+- 文字数は **3,500〜5,000字程度**（読み上げで7〜10分）
+- 海外6本は全て取り上げる、国内は深掘り3本のみ"""
 
 
 # ============================================================
-# Step 1: 朝刊Markdown生成（Gemini 2.5 Pro + Google Search）
+# Step 1: 海外朝刊Markdown生成
 # ============================================================
-def generate_morning_news(api_key: str) -> str:
-    """Gemini 2.5 Pro + Google Search Grounding で朝刊Markdownを生成する。"""
+def generate_global_news(api_key: str) -> str:
     today = datetime.now(JST)
     date_label = today.strftime("%Y-%m-%d %a")
 
-    print(f"[INFO] [Step 1/3] Generating morning news for {date_label}...", file=sys.stderr)
+    print(f"[INFO] [Step 1/4] Generating global morning news for {date_label}...", file=sys.stderr)
     print(f"[INFO] Model: {NEWS_MODEL} (Gemini)", file=sys.stderr)
 
     client = genai.Client(api_key=api_key)
-
     user_prompt = (
-        f"今日（{date_label}）の朝刊を生成してください。\n\n"
+        f"今日（{date_label}）の海外ニュース朝刊を生成してください。\n\n"
         "過去24〜72時間の海外主要紙ヘッドラインから、"
-        "メイン5本＋国内未報道スポット1本を選定し、"
-        "SKILL指示に従って完全な朝刊Markdownを出力してください。\n\n"
+        "メイン5本＋国内未報道スポット1本を選定し、完全な朝刊Markdownを出力してください。\n\n"
         "Google Searchを使って最新情報を取得しながら進めてください。"
     )
 
-    # Google Search Grounding を有効化
     google_search_tool = types.Tool(google_search=types.GoogleSearch())
 
     response = client.models.generate_content(
         model=NEWS_MODEL,
         contents=user_prompt,
         config=types.GenerateContentConfig(
-            system_instruction=NEWS_SYSTEM_PROMPT,
+            system_instruction=GLOBAL_NEWS_SYSTEM_PROMPT,
             tools=[google_search_tool],
             max_output_tokens=MAX_TOKENS_NEWS,
             temperature=0.7,
@@ -279,28 +431,78 @@ def generate_morning_news(api_key: str) -> str:
     )
 
     markdown_body = response.text or ""
-    print(f"[INFO] Generated {len(markdown_body)} chars of markdown", file=sys.stderr)
-
-    # Grounding情報があればログに出す（デバッグ用、コストではない）
-    if hasattr(response, "candidates") and response.candidates:
-        candidate = response.candidates[0]
-        if hasattr(candidate, "grounding_metadata") and candidate.grounding_metadata:
-            chunks = getattr(candidate.grounding_metadata, "grounding_chunks", None)
-            if chunks:
-                print(f"[INFO] Grounding sources: {len(chunks)} pages referenced", file=sys.stderr)
-
+    print(f"[INFO] Generated {len(markdown_body)} chars of global news markdown", file=sys.stderr)
     return markdown_body
 
 
 # ============================================================
-# Step 2: ラジオ台本に変換（Anthropic Claude Sonnet 4.6）
+# Step 2: 国内朝刊Markdown生成（重複排除あり）
 # ============================================================
-def generate_radio_script(api_key: str, news_markdown: str) -> str:
-    """朝刊Markdownをラジオ番組風の台本に変換する（Anthropic Claude）。"""
+def extract_global_headlines(global_news_md: str) -> list[str]:
+    """海外朝刊のフロントページから見出し一覧を抽出する（重複排除用）。"""
+    headlines = []
+    # フロントページの ① ② ③ ④ ⑤ パターンと スポット の見出しを拾う
+    pattern = re.compile(r"\*\*[①②③④⑤]\s*([^*]+)\*\*", re.MULTILINE)
+    for match in pattern.findall(global_news_md):
+        headlines.append(match.strip())
+
+    # スポットの見出し（**国内未報道スポット | XXX** または **国内未報道スポット** の次行の見出し）
+    spot_pattern = re.compile(r"🔍\s*\*\*国内未報道スポット\*\*\s*\n\s*\*\*([^*]+)\*\*")
+    for match in spot_pattern.findall(global_news_md):
+        headlines.append(match.strip())
+
+    return headlines
+
+
+def generate_domestic_news(api_key: str, global_headlines: list[str]) -> str:
+    today = datetime.now(JST)
+    date_label = today.strftime("%Y-%m-%d %a")
+
+    print(f"[INFO] [Step 2/4] Generating domestic morning news...", file=sys.stderr)
+    print(f"[INFO] Model: {NEWS_MODEL} (Gemini)", file=sys.stderr)
+    print(f"[INFO] Excluding {len(global_headlines)} topics from global edition", file=sys.stderr)
+
+    headlines_text = "\n".join(f"- {h}" for h in global_headlines) if global_headlines else "（海外朝刊の見出し抽出に失敗）"
+
+    client = genai.Client(api_key=api_key)
+    user_prompt = (
+        f"今日（{date_label}）の国内ニュース朝刊（ビジネス・経済中心）を生成してください。\n\n"
+        f"# 本日の海外朝刊の見出し（重複排除のため）\n\n"
+        f"以下の話題は本日の海外朝刊で扱われています。これらの話題と重複する内容は、"
+        f"国内朝刊には含めないでください。\n\n"
+        f"{headlines_text}\n\n"
+        f"# 指示\n\n"
+        f"国内発の独立したビジネス・経済ニュースを選定し、"
+        f"深掘り3本＋見出し4本＝合計7本の構成で、完全な朝刊Markdownを出力してください。\n\n"
+        f"Google Searchを使って最新情報を取得しながら進めてください。"
+    )
+
+    google_search_tool = types.Tool(google_search=types.GoogleSearch())
+
+    response = client.models.generate_content(
+        model=NEWS_MODEL,
+        contents=user_prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=DOMESTIC_NEWS_SYSTEM_PROMPT,
+            tools=[google_search_tool],
+            max_output_tokens=MAX_TOKENS_NEWS,
+            temperature=0.7,
+        ),
+    )
+
+    markdown_body = response.text or ""
+    print(f"[INFO] Generated {len(markdown_body)} chars of domestic news markdown", file=sys.stderr)
+    return markdown_body
+
+
+# ============================================================
+# Step 3: 拡張ラジオ台本生成
+# ============================================================
+def generate_radio_script(api_key: str, global_news_md: str, domestic_news_md: str) -> str:
     today = datetime.now(JST)
     date_label = today.strftime("%Y年%m月%d日 %a曜日")
 
-    print(f"[INFO] [Step 2/3] Generating radio script...", file=sys.stderr)
+    print(f"[INFO] [Step 3/4] Generating extended radio script...", file=sys.stderr)
     print(f"[INFO] Model: {SCRIPT_MODEL} (Anthropic)", file=sys.stderr)
 
     client = anthropic.Anthropic(api_key=api_key)
@@ -312,9 +514,14 @@ def generate_radio_script(api_key: str, news_markdown: str) -> str:
             {
                 "role": "user",
                 "content": (
-                    f"以下の朝刊Markdown（日付: {date_label}）を、ラジオ番組風の台本に変換してください。\n\n"
-                    f"---\n\n{news_markdown}\n\n---\n\n"
-                    "音声化するため、絵文字・記号・URL・箇条書き記号を一切使わない、"
+                    f"以下の海外朝刊と国内朝刊（日付: {date_label}）を、"
+                    f"7〜10分のラジオ番組台本に変換してください。\n\n"
+                    f"# 海外朝刊\n\n{global_news_md}\n\n"
+                    f"# 国内朝刊\n\n{domestic_news_md}\n\n"
+                    f"---\n\n"
+                    "海外6本＋国内深掘り3本＝合計9本を取り上げてください。"
+                    "国内の見出し4本は省略してください。"
+                    "音声化のため、絵文字・記号・URL・箇条書き記号を一切使わない、"
                     "プレーンテキストの台本を出力してください。"
                 ),
             }
@@ -328,11 +535,10 @@ def generate_radio_script(api_key: str, news_markdown: str) -> str:
 
 
 # ============================================================
-# Step 3: OpenAI TTS で音声生成（v2と同じ）
+# Step 4: OpenAI TTS で音声生成
 # ============================================================
 def generate_audio_with_openai(api_key: str, script: str, output_path: str) -> str:
-    """OpenAI TTS APIで台本をMP3に変換する。"""
-    print(f"[INFO] [Step 3/3] Generating audio with OpenAI TTS...", file=sys.stderr)
+    print(f"[INFO] [Step 4/4] Generating audio with OpenAI TTS...", file=sys.stderr)
     print(f"[INFO] TTS model: {TTS_MODEL}, voice: {TTS_VOICE}", file=sys.stderr)
 
     client = OpenAI(api_key=api_key)
@@ -379,19 +585,24 @@ def _split_text_for_tts(text: str, max_chars: int = 4000) -> list[str]:
 
 
 # ============================================================
-# Markdown → HTML 変換
+# Markdown → HTML 変換（海外＋国内を1通に統合）
 # ============================================================
-def markdown_to_email_html(md_text: str, date_label: str, has_audio: bool) -> str:
-    html_body = markdown.markdown(
-        md_text,
-        extensions=["extra", "sane_lists", "nl2br"],
-    )
+def build_email_html(global_news_md: str, domestic_news_md: str, date_label: str, has_audio: bool) -> str:
+    """海外朝刊と国内朝刊を1通のHTMLメールに統合する。"""
+    global_html = markdown.markdown(global_news_md, extensions=["extra", "sane_lists", "nl2br"])
+    domestic_html = markdown.markdown(domestic_news_md, extensions=["extra", "sane_lists", "nl2br"])
 
     audio_notice = ""
     if has_audio:
         audio_notice = """
     <div style="background:#fff8e7;border-left:4px solid #f0a500;padding:12px 16px;margin:0 0 24px 0;font-size:14px;color:#444;">
-      🎧 <strong>音声版が添付されています</strong>（MP3, 約3〜5分）。通勤・ランニング中の聴取にどうぞ。
+      🎧 <strong>音声版が添付されています</strong>（MP3, 約7〜10分）。海外6本＋国内深掘り3本のラジオ番組です。
+    </div>"""
+
+    section_divider = """
+    <div style="margin:48px 0;padding:24px 0;border-top:4px double #1a1a1a;border-bottom:4px double #1a1a1a;text-align:center;">
+      <div style="font-size:13px;color:#888;letter-spacing:0.2em;">SECTION 2</div>
+      <div style="font-size:18px;font-weight:bold;margin-top:4px;">🇯🇵 国内ニュース朝刊</div>
     </div>"""
 
     email_html = f"""<!DOCTYPE html>
@@ -402,16 +613,34 @@ def markdown_to_email_html(md_text: str, date_label: str, has_audio: bool) -> st
 </head>
 <body style="margin:0;padding:0;background:#f5f5f5;font-family:'Hiragino Sans','Yu Gothic','Meiryo',sans-serif;color:#222;line-height:1.7;">
   <div style="max-width:680px;margin:0 auto;padding:24px 16px;background:#ffffff;">
+
     <div style="border-bottom:3px solid #1a1a1a;padding-bottom:12px;margin-bottom:24px;">
       <div style="font-size:13px;color:#888;letter-spacing:0.1em;">MORNING NEWS BRIEFING</div>
-      <div style="font-size:22px;font-weight:bold;margin-top:4px;">海外ニュース朝刊 / {date_label}</div>
-    </div>{audio_notice}
+      <div style="font-size:22px;font-weight:bold;margin-top:4px;">朝刊 / {date_label}</div>
+      <div style="font-size:12px;color:#888;margin-top:4px;">海外6本＋国内7本</div>
+    </div>
+
+    {audio_notice}
+
+    <div style="margin:24px 0 16px 0;text-align:center;">
+      <div style="font-size:13px;color:#888;letter-spacing:0.2em;">SECTION 1</div>
+      <div style="font-size:18px;font-weight:bold;margin-top:4px;">🌍 海外ニュース朝刊</div>
+    </div>
+
     <div style="font-size:15px;color:#222;">
-      {_inject_inline_styles(html_body)}
+      {_inject_inline_styles(global_html)}
     </div>
+
+    {section_divider}
+
+    <div style="font-size:15px;color:#222;">
+      {_inject_inline_styles(domestic_html)}
+    </div>
+
     <div style="margin-top:40px;padding-top:16px;border-top:1px solid #ddd;font-size:12px;color:#888;text-align:center;">
-      Generated by Gemini 2.5 Pro + OpenAI TTS · GitHub Actions
+      Generated by Gemini 2.5 Pro + Claude Sonnet 4.6 + OpenAI TTS · GitHub Actions
     </div>
+
   </div>
 </body>
 </html>"""
@@ -439,7 +668,7 @@ def _inject_inline_styles(html: str) -> str:
 
 
 # ============================================================
-# Gmail SMTP送信（v2と同じ）
+# Gmail SMTP送信
 # ============================================================
 def send_email_with_audio(
     sender: str,
@@ -515,21 +744,31 @@ def main() -> int:
     today = datetime.now(JST)
     date_label = today.strftime("%Y-%m-%d %a")
 
-    # Step 1: 朝刊生成（Gemini）
+    # Step 1: 海外朝刊
     try:
-        markdown_body = generate_morning_news(gemini_key)
-        if not markdown_body.strip():
-            raise RuntimeError("Empty response from Gemini")
+        global_news_md = generate_global_news(gemini_key)
+        if not global_news_md.strip():
+            raise RuntimeError("Empty response from Gemini for global news")
     except Exception as e:
-        print(f"[ERROR] Failed to generate news: {e}", file=sys.stderr)
-        markdown_body = f"# 朝刊生成エラー\n\n本日の朝刊生成に失敗しました。\n\nエラー: `{e}`\n\nGitHub Actions のログを確認してください。"
+        print(f"[ERROR] Failed to generate global news: {e}", file=sys.stderr)
+        global_news_md = f"# 海外朝刊生成エラー\n\nエラー: `{e}`"
         audio_enabled = False
 
-    # Step 2 & 3: 台本 + 音声
+    # Step 2: 国内朝刊（重複排除あり）
+    try:
+        global_headlines = extract_global_headlines(global_news_md)
+        domestic_news_md = generate_domestic_news(gemini_key, global_headlines)
+        if not domestic_news_md.strip():
+            raise RuntimeError("Empty response from Gemini for domestic news")
+    except Exception as e:
+        print(f"[ERROR] Failed to generate domestic news: {e}", file=sys.stderr)
+        domestic_news_md = f"# 国内朝刊生成エラー\n\nエラー: `{e}`"
+
+    # Step 3 & 4: 台本生成 + 音声生成
     audio_path = None
     if audio_enabled:
         try:
-            script = generate_radio_script(anthropic_key, markdown_body)
+            script = generate_radio_script(anthropic_key, global_news_md, domestic_news_md)
             audio_path = f"morning_news_{today.strftime('%Y%m%d')}.mp3"
             generate_audio_with_openai(openai_key, script, audio_path)
         except Exception as e:
@@ -537,11 +776,15 @@ def main() -> int:
             print("[WARN] Falling back to email-only delivery.", file=sys.stderr)
             audio_path = None
 
-    # Step 4: メール送信
+    # メール送信
     has_audio = audio_path is not None
-    html = markdown_to_email_html(markdown_body, date_label, has_audio=has_audio)
+    html = build_email_html(global_news_md, domestic_news_md, date_label, has_audio=has_audio)
+
     audio_emoji = "🎧" if has_audio else "📰"
-    subject = f"{audio_emoji} 海外ニュース朝刊 / {date_label}"
+    subject = f"{audio_emoji} 朝刊（海外6＋国内7） / {date_label}"
+
+    # Plain版は両朝刊を結合
+    plain_body = f"{global_news_md}\n\n\n========================================\n\n\n{domestic_news_md}"
 
     send_email_with_audio(
         sender=gmail_address,
@@ -549,7 +792,7 @@ def main() -> int:
         recipient=recipient_email,
         subject=subject,
         html_body=html,
-        plain_body=markdown_body,
+        plain_body=plain_body,
         audio_path=audio_path,
     )
     return 0
