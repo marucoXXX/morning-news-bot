@@ -1,6 +1,9 @@
 """
-Morning News Bot v3.2
+Morning News Bot v3.3
 ======================
+- v3.3 で追加: ソースURL捏造問題の修正
+  - 各記事の「🔗 ソース」欄は媒体名のみ表記に変更
+  - 朝刊末尾に「📚 本日参照したソース一覧」を追加（Grounding Metadataから抽出した実URLのみ）
 - 海外ニュース朝刊6本（メイン5本＋国内未報道スポット1本）
 - 国内ニュース朝刊7本（深掘り3本＋見出し4本）
 - 重複排除ロジック（海外で扱った話題を国内から除外）
@@ -91,8 +94,21 @@ US: NYT / WSJ / Bloomberg / Reuters / AP / Axios / TechCrunch / The Information 
 **🤨 批判的コメント**
 {2〜3文}
 
-**🔗 ソース**: {URL1} | {URL2}
+**🔗 ソース**: {媒体名1} | {媒体名2}
 ```
+
+# ソース表記の厳守ルール（最重要）
+
+各記事の「🔗 ソース」欄には、URLを書かないこと。
+代わりに、参照した媒体名のみを記載する。
+
+✅ 正しい例: 🔗 ソース: Bloomberg | Reuters
+✅ 正しい例: 🔗 ソース: TechCrunch | The Information | FT
+❌ 間違い: 🔗 ソース: https://www.bloomberg.com/news/articles/...
+
+理由: URLを直接書くと、検索結果に存在しない架空のURLを生成してしまう
+リスクがあるため、媒体名のみに統一する。実URLは末尾の参照ソース一覧で
+別途まとめて提示する。
 
 # 通貨併記ルール
 
@@ -206,15 +222,28 @@ DOMESTIC_NEWS_SYSTEM_PROMPT = """あなたは日経新聞・東洋経済・ダ�
 **🤨 批判的コメント**
 {2〜3文}
 
-**🔗 ソース**: {URL1} | {URL2}
+**🔗 ソース**: {媒体名1} | {媒体名2}
 ```
 
 ### 見出し4本（軽量版、各約100〜150字）
 
 ```
 **④ {見出し}**
-{2〜3文の要約。具体的な数字・固有名詞含む。最低1ソースのリンクを最後に}
+{2〜3文の要約。具体的な数字・固有名詞含む。末尾に参照媒体名を記載（URLは書かない）}
 ```
+
+# ソース表記の厳守ルール（最重要）
+
+各記事の「🔗 ソース」欄および見出し記事の参照表記には、URLを書かないこと。
+代わりに、参照した媒体名のみを記載する。
+
+✅ 正しい例: 🔗 ソース: 日経新聞 | Bloomberg日本版
+✅ 正しい例: 🔗 ソース: 東洋経済オンライン | Reuters日本版
+❌ 間違い: 🔗 ソース: https://www.nikkei.com/article/...
+
+理由: URLを直接書くと、検索結果に存在しない架空のURLを生成してしまう
+リスクがあるため、媒体名のみに統一する。実URLは末尾の参照ソース一覧で
+別途まとめて提示する。
 
 ## 通貨併記ルール
 
@@ -400,9 +429,61 @@ d. 批判的コメント（1文、見落とされがちな観点）
 
 
 # ============================================================
+# Grounding URL 抽出 / ソース一覧追加ヘルパー
+# ============================================================
+def extract_grounding_urls(response) -> list[dict]:
+    """Geminiレスポンスから grounding_metadata の実URL一覧を抽出する。
+
+    Returns:
+        [{"url": "https://...", "title": "..."}, ...] のリスト
+    """
+    urls = []
+    seen = set()
+
+    if not hasattr(response, "candidates") or not response.candidates:
+        return urls
+
+    candidate = response.candidates[0]
+    if not hasattr(candidate, "grounding_metadata") or not candidate.grounding_metadata:
+        return urls
+
+    grounding_chunks = getattr(candidate.grounding_metadata, "grounding_chunks", None)
+    if not grounding_chunks:
+        return urls
+
+    for chunk in grounding_chunks:
+        web = getattr(chunk, "web", None)
+        if web:
+            url = getattr(web, "uri", None)
+            title = getattr(web, "title", None) or "(タイトル不明)"
+            if url and url not in seen:
+                seen.add(url)
+                urls.append({"url": url, "title": title})
+
+    return urls
+
+
+def append_source_list(markdown_body: str, grounding_urls: list[dict], section_title: str) -> str:
+    """朝刊Markdownの末尾に「参照したソース一覧」セクションを追加する。"""
+    if not grounding_urls:
+        return markdown_body
+
+    source_section = f"\n\n---\n\n## 📚 {section_title}\n\n"
+    source_section += "_本朝刊の生成にあたり、Google Searchで実際に参照した記事一覧です。クリックで原典記事に飛べます。_\n\n"
+
+    for i, item in enumerate(grounding_urls, 1):
+        title = item["title"]
+        if len(title) > 80:
+            title = title[:77] + "..."
+        source_section += f"{i}. [{title}]({item['url']})\n"
+
+    return markdown_body + source_section
+
+
+# ============================================================
 # Step 1: 海外朝刊Markdown生成
 # ============================================================
-def generate_global_news(api_key: str) -> str:
+def generate_global_news(api_key: str) -> tuple[str, list[dict]]:
     today = datetime.now(JST)
     date_label = today.strftime("%Y-%m-%d %a")
 
@@ -432,7 +513,11 @@ def generate_global_news(api_key: str) -> str:
 
     markdown_body = response.text or ""
     print(f"[INFO] Generated {len(markdown_body)} chars of global news markdown", file=sys.stderr)
-    return markdown_body
+
+    grounding_urls = extract_grounding_urls(response)
+    print(f"[INFO] Extracted {len(grounding_urls)} grounding URLs", file=sys.stderr)
+
+    return markdown_body, grounding_urls
 
 
 # ============================================================
@@ -454,7 +539,7 @@ def extract_global_headlines(global_news_md: str) -> list[str]:
     return headlines
 
 
-def generate_domestic_news(api_key: str, global_headlines: list[str]) -> str:
+def generate_domestic_news(api_key: str, global_headlines: list[str]) -> tuple[str, list[dict]]:
     today = datetime.now(JST)
     date_label = today.strftime("%Y-%m-%d %a")
 
@@ -492,7 +577,11 @@ def generate_domestic_news(api_key: str, global_headlines: list[str]) -> str:
 
     markdown_body = response.text or ""
     print(f"[INFO] Generated {len(markdown_body)} chars of domestic news markdown", file=sys.stderr)
-    return markdown_body
+
+    grounding_urls = extract_grounding_urls(response)
+    print(f"[INFO] Extracted {len(grounding_urls)} grounding URLs", file=sys.stderr)
+
+    return markdown_body, grounding_urls
 
 
 # ============================================================
@@ -745,8 +834,9 @@ def main() -> int:
     date_label = today.strftime("%Y-%m-%d %a")
 
     # Step 1: 海外朝刊
+    global_urls: list[dict] = []
     try:
-        global_news_md = generate_global_news(gemini_key)
+        global_news_md, global_urls = generate_global_news(gemini_key)
         if not global_news_md.strip():
             raise RuntimeError("Empty response from Gemini for global news")
     except Exception as e:
@@ -755,14 +845,20 @@ def main() -> int:
         audio_enabled = False
 
     # Step 2: 国内朝刊（重複排除あり）
+    # ヘッドライン抽出はソース一覧追加前のmarkdownから行う（重複排除の精度のため）
+    domestic_urls: list[dict] = []
     try:
         global_headlines = extract_global_headlines(global_news_md)
-        domestic_news_md = generate_domestic_news(gemini_key, global_headlines)
+        domestic_news_md, domestic_urls = generate_domestic_news(gemini_key, global_headlines)
         if not domestic_news_md.strip():
             raise RuntimeError("Empty response from Gemini for domestic news")
     except Exception as e:
         print(f"[ERROR] Failed to generate domestic news: {e}", file=sys.stderr)
         domestic_news_md = f"# 国内朝刊生成エラー\n\nエラー: `{e}`"
+
+    # 末尾に「📚 本日参照したソース一覧」を追加（実URLのみ）
+    global_news_md = append_source_list(global_news_md, global_urls, "本日参照した海外ソース")
+    domestic_news_md = append_source_list(domestic_news_md, domestic_urls, "本日参照した国内ソース")
 
     # Step 3 & 4: 台本生成 + 音声生成
     audio_path = None
